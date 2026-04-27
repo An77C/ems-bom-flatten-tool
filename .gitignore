@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local generated outputs
+output/
+
+# Local data files
+data/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
