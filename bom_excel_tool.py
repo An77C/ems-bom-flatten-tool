@@ -384,10 +384,11 @@ def _build_item_to_ecode_map(
     sheet: str | int | None,
     level_marker: str,
     header_sep: str,
-) -> dict[tuple[str, str], str]:
+) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str], str]]:
     """
-    建立 (Assembly, Item) -> Ecode 對照。
-    - Assembly 維度使用對照檔工作表名稱
+    建立 Ecode 對照（優先 Model 維度，其次 Assembly 維度）：
+    - (Model, Item) -> Ecode
+    - (Assembly, Item) -> Ecode
     - 若未指定 sheet，會掃描對照檔所有工作表
     """
     sheet_names: list[str]
@@ -398,7 +399,8 @@ def _build_item_to_ecode_map(
     else:
         sheet_names = [sheet]
 
-    grouped: dict[tuple[str, str], list[str]] = {}
+    grouped_by_model: dict[tuple[str, str], list[str]] = {}
+    grouped_by_assembly: dict[tuple[str, str], list[str]] = {}
     processed_sheet_count = 0
     for sheet_name in sheet_names:
         try:
@@ -413,26 +415,46 @@ def _build_item_to_ecode_map(
             continue
         item_col = _resolve_column_name(mapping_df.columns.tolist(), "Item")
         ecode_col = _resolve_ecode_source_column(mapping_df.columns.tolist())
+        model_col = _resolve_column_name(mapping_df.columns.tolist(), "Model")
+        assembly_col = _resolve_column_name(mapping_df.columns.tolist(), "Assembly")
         if not item_col or not ecode_col:
             raise ValueError(
                 f"對照檔工作表「{sheet_name}」缺少必要欄位，Item={item_col}, Customer PN={ecode_col}"
             )
 
         processed_sheet_count += 1
-        assembly_key = _cell_str(sheet_name)
-        for item_raw, ecode_raw in zip(mapping_df[item_col].tolist(), mapping_df[ecode_col].tolist()):
+        sheet_name_key = _cell_str(sheet_name)
+        model_values = mapping_df[model_col].tolist() if model_col else [""] * len(mapping_df)
+        assembly_values = mapping_df[assembly_col].tolist() if assembly_col else [""] * len(mapping_df)
+        for item_raw, ecode_raw, model_raw, assembly_raw in zip(
+            mapping_df[item_col].tolist(),
+            mapping_df[ecode_col].tolist(),
+            model_values,
+            assembly_values,
+        ):
             item = _cell_str(item_raw)
             ecode = _cell_str(ecode_raw)
             if not item or not ecode:
                 continue
-            map_key = (assembly_key, item)
-            if map_key not in grouped:
-                grouped[map_key] = []
-            if ecode not in grouped[map_key]:
-                grouped[map_key].append(ecode)
+            model_key = (_cell_str(model_raw), item)
+            if model_key[0]:
+                if model_key not in grouped_by_model:
+                    grouped_by_model[model_key] = []
+                if ecode not in grouped_by_model[model_key]:
+                    grouped_by_model[model_key].append(ecode)
+
+            assembly_key_text = _cell_str(assembly_raw) or sheet_name_key
+            assembly_key = (assembly_key_text, item)
+            if assembly_key not in grouped_by_assembly:
+                grouped_by_assembly[assembly_key] = []
+            if ecode not in grouped_by_assembly[assembly_key]:
+                grouped_by_assembly[assembly_key].append(ecode)
     if processed_sheet_count == 0:
         raise ValueError("對照檔找不到可用工作表（需含 Level 標題列）")
-    return {k: "、".join(v) for k, v in grouped.items()}
+    return (
+        {k: "、".join(v) for k, v in grouped_by_model.items()},
+        {k: "、".join(v) for k, v in grouped_by_assembly.items()},
+    )
 
 
 def _resolve_ecode_source_column(columns: Sequence[str]) -> str | None:
@@ -448,18 +470,31 @@ def _resolve_ecode_source_column(columns: Sequence[str]) -> str | None:
     return None
 
 
-def _apply_ecode_mapping(df: pd.DataFrame, mapping: dict[tuple[str, str], str]) -> pd.DataFrame:
+def _apply_ecode_mapping(
+    df: pd.DataFrame,
+    mapping_by_model: dict[tuple[str, str], str],
+    mapping_by_assembly: dict[tuple[str, str], str],
+) -> pd.DataFrame:
     item_col = _resolve_column_name(df.columns.tolist(), "Item")
     assembly_col = _resolve_column_name(df.columns.tolist(), "Assembly")
+    model_col = _resolve_column_name(df.columns.tolist(), "Model")
     if not item_col:
         raise ValueError("主檔找不到 Item 欄位，無法回填 Ecode")
     if not assembly_col:
         raise ValueError("主檔找不到 Assembly 欄位，無法以 Assembly + Item 回填 Ecode")
+    if not model_col:
+        raise ValueError("主檔找不到 Model 欄位，無法以 Model + Item 回填 Ecode")
 
+    # 同料號跨多表時，先用 Assembly 區分；僅在未命中時才回退到 Model。
     mapped = pd.Series(
         (
-            mapping.get((_cell_str(assembly_val), _cell_str(item_val)), "")
-            for assembly_val, item_val in zip(df[assembly_col], df[item_col])
+            (
+                mapping_by_assembly.get((_cell_str(assembly_val), _cell_str(item_val)), "")
+                or mapping_by_model.get((_cell_str(model_val), _cell_str(item_val)), "")
+            )
+            for model_val, assembly_val, item_val in zip(
+                df[model_col], df[assembly_col], df[item_col]
+            )
         ),
         index=df.index,
     )
@@ -767,6 +802,7 @@ def _build_selected_output_path(output: Path) -> Path:
 
 
 def _read_main_dataframe(args: argparse.Namespace) -> tuple[pd.DataFrame, BomReadInfo]:
+    """讀取主檔（單表或多表），並回傳合併後資料與摘要資訊。"""
     sheet_arg: str | int | None = args.sheet if args.sheet else None
     df, info, processed_main_sheets = read_bom_multi_sheet(
         args.input,
@@ -781,26 +817,42 @@ def _read_main_dataframe(args: argparse.Namespace) -> tuple[pd.DataFrame, BomRea
 def _apply_ecode_if_needed(
     df: pd.DataFrame, info: BomReadInfo, args: argparse.Namespace
 ) -> tuple[pd.DataFrame, BomReadInfo]:
+    """若提供對照檔則回填 Ecode；未提供時直接回傳原資料。"""
     if not args.ecode_source:
         return df, info
     if not args.ecode_source.is_file():
         raise ValueError(f"找不到 Ecode 對照檔: {args.ecode_source}")
 
     ecode_sheet_arg: str | int | None = args.ecode_sheet if args.ecode_sheet else None
-    ecode_map = _build_item_to_ecode_map(
+    ecode_map_by_model, ecode_map_by_assembly = _build_item_to_ecode_map(
         mapping_file=args.ecode_source,
         sheet=ecode_sheet_arg,
         level_marker=args.marker,
         header_sep=args.sep,
     )
-    df = _apply_ecode_mapping(df, ecode_map)
-    print(f"Ecode 對照筆數: {len(ecode_map)}")
+    df = _apply_ecode_mapping(df, ecode_map_by_model, ecode_map_by_assembly)
+    print(
+        "Ecode 對照筆數: "
+        f"Model+Item={len(ecode_map_by_model)}, "
+        f"Assembly+Item={len(ecode_map_by_assembly)}"
+    )
     return df, _update_info_column_count(info, len(df.columns))
 
 
 def _apply_final_transforms(df: pd.DataFrame, info: BomReadInfo) -> tuple[pd.DataFrame, BomReadInfo]:
+    """集中最終資料整理：展開 Sub，並移除 Item 空白列。"""
     df = _expand_sub_rows(df)
+    df = _drop_empty_item_rows(df)
     return df, _update_info_column_count(info, len(df.columns))
+
+
+def _drop_empty_item_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """刪除 Item 為空/空白字元的資料列，避免輸出無效項目。"""
+    item_col = _resolve_column_name(df.columns.tolist(), "Item")
+    if not item_col:
+        return df
+    mask = df[item_col].fillna("").astype(str).str.strip() != ""
+    return df.loc[mask].reset_index(drop=True)
 
 
 def _write_outputs(df: pd.DataFrame, args: argparse.Namespace) -> None:

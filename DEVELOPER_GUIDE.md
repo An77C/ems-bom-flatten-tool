@@ -46,7 +46,7 @@
 - `BOARD_KEYWORDS`：`Board` 關鍵字常數（集中維護分類詞）
 - `_build_main_source_columns()`：建立 `M/S` 與 `Main Source`
 - `_rename_sub_columns()`：將 `2ND_SOURCE_TOTAL` 起的尾端欄位轉為 `Sub_*` 群組並刪除每組第 4 欄
-- `_build_item_to_ecode_map()`：由對照檔建立 `(Assembly, Item) -> Customer PN` 對照
+- `_build_item_to_ecode_map()`：由對照檔建立 `(Model, Item)` 與 `(Assembly, Item)` 對照
 - `_apply_ecode_mapping()`：將對照回填至主檔 `Ecode` 欄位
 - `_expand_sub_rows()`：將 `Sub_n` 展開為子料列，並沿用主料關鍵欄位
 - `read_bom_multi_sheet()`：未指定 `--sheet` 時合併主檔所有可用工作表
@@ -91,7 +91,7 @@
 - 未指定 `--ecode-sheet` 時，掃描對照檔所有工作表
 - 對照檔以「工作表名稱」作為 `Assembly` 維度
 - 每個工作表中使用 `Item` 與 `Customer PN`（或 `Customer PN` 近似欄名）建立映射
-- 主檔以 `(Assembly, Item)` 回填 `Ecode`
+- 主檔回填優先順序：`(Model, Item)` -> `(Assembly, Item)`
 - 若主檔已有 `Ecode`，僅在新對照有值時覆蓋
 
 ### 5.6 `Sub_*` 展開子料列規則

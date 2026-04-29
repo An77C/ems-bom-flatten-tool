@@ -61,7 +61,7 @@ python bom_excel_tool.py INPUT [-o OUTPUT] [--sheet SHEET] [--marker MARKER] [--
 - `--marker`：標題中心列第一欄文字（預設 `Level`）
 - `--sep`：三列表頭合併分隔字元（預設空白字元 ` `）
 - `--preview`：僅預覽，不寫檔
-- `--ecode-source`：Ecode 對照來源檔（以 `Assembly(表名) + Item` 對應 `Customer PN`）
+- `--ecode-source`：Ecode 對照來源檔（優先以 `Model + Item`，其次 `Assembly(表名) + Item` 對應 `Customer PN`）
 - `--ecode-sheet`：Ecode 對照來源檔工作表（指定單一工作表；未指定時會掃描所有工作表）
 - `--selected-only`：只輸出指定欄位檔（`*_selected`）
 - `--no-selected`：只輸出完整欄位檔
@@ -109,9 +109,9 @@ python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" --ecode-source 
 Ecode 對照規則：
 
 - 可一次掃描對照檔多個工作表（未指定 `--ecode-sheet` 時）
-- 對照鍵值為：`Assembly(主檔欄位)` + `Item`
-- 其中 Assembly 維度來自對照檔「工作表名稱」
-- 只有當主檔 `Assembly` 與對照檔工作表名一致，且 `Item` 一致，才會回填 `Ecode`
+- 對照鍵值優先為：`Model(主檔欄位)` + `Item`
+- 若 `Model + Item` 未命中，回退使用：`Assembly(主檔欄位)` + `Item`
+- Assembly 維度預設取對照檔「工作表名稱」（若對照表中有 Assembly 欄位則優先使用）
 
 ### 5.6 展開 Sub 為子料列
 
