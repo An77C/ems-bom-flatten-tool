@@ -11,14 +11,15 @@
 
 ## 2. 程式流程
 
-主流程位於 `main()`：
+主流程位於 `main()`（預設以 `BOM COST` 為主料來源；若提供 `--sub-source` 則用 EMS 的 `Sub_*` 生成 S 子料列）：
 
 1. `_build_parser()` 解析 CLI 參數
-2. `_read_main_dataframe()` 讀取主檔（單表或多表合併）並轉換資料
-3. `_apply_ecode_if_needed()` 套用 Ecode 對照（可略過）
-4. `_apply_final_transforms()` 套用後處理（如 Sub 展開）
-5. `--preview` 時走 `_print_preview()`
-6. 否則走 `_write_outputs()` 輸出完整檔與指定欄位檔
+2. `_read_main_dataframe()`：讀取主檔（`INPUT(BOM COST)`；支援多表）
+3. `_ensure_ecode_column_from_bom()`：從 `BOM COST` 補齊/確保 `Ecode` 欄位
+4. `_drop_empty_item_rows()`：刪除 `Item` 空白列
+5. 若提供 `--sub-source(EMS BOM COST)`：讀取子料檔（支援多表），並走 `_expand_sub_rows_from_ems_using_bom_template()`
+6. 若未提供 `--sub-source`：走 `_apply_final_transforms()`（使用 BOM COST 內建 `Sub_*` 展開）
+7. `--preview` 時走 `_print_preview()`；否則 `_write_outputs()` 輸出
 
 ## 3. 核心資料結構
 
@@ -46,9 +47,10 @@
 - `BOARD_KEYWORDS`：`Board` 關鍵字常數（集中維護分類詞）
 - `_build_main_source_columns()`：建立 `M/S` 與 `Main Source`
 - `_rename_sub_columns()`：將 `2ND_SOURCE_TOTAL` 起的尾端欄位轉為 `Sub_*` 群組並刪除每組第 4 欄
-- `_build_item_to_ecode_map()`：由對照檔建立 `(Model, Item)` 與 `(Assembly, Item)` 對照
-- `_apply_ecode_mapping()`：將對照回填至主檔 `Ecode` 欄位
-- `_expand_sub_rows()`：將 `Sub_n` 展開為子料列，並沿用主料關鍵欄位
+- `_ensure_ecode_column_from_bom()`：從 `BOM COST` 取得 `Ecode`
+- `_drop_empty_item_rows()`：刪除 `Item` 空白列
+- `_expand_sub_rows_from_ems_using_bom_template()`：以 EMS 的 `Sub_*` 生成子料列（子料幣別/價格來自 Sub）
+- `_expand_sub_rows()`：預設 BOM 內建的 Sub 展開（僅在未提供 `--sub-source` 時使用）
 - `read_bom_multi_sheet()`：未指定 `--sheet` 時合併主檔所有可用工作表
 - `_write_output()`：依副檔名寫出 CSV / XLSX
 
@@ -85,14 +87,10 @@
   - 4 -> 刪除
 - 轉換順序必須先 `_rename_sub_columns()`，再 `_build_main_source_columns()`，避免尾端分組覆蓋 `M/S`、`Main Source`
 
-### 5.5 `Ecode` 對照規則（雙檔模式）
+### 5.5 `Ecode` 來源規則（BOM COST 為主）
 
-- 以 `--ecode-source` 指定對照檔
-- 未指定 `--ecode-sheet` 時，掃描對照檔所有工作表
-- 對照檔以「工作表名稱」作為 `Assembly` 維度
-- 每個工作表中使用 `Item` 與 `Customer PN`（或 `Customer PN` 近似欄名）建立映射
-- 主檔回填優先順序：`(Model, Item)` -> `(Assembly, Item)`
-- 若主檔已有 `Ecode`，僅在新對照有值時覆蓋
+- `Ecode` 直接取自 `BOM COST` 的 `Customer PN`（或已存在 `Ecode` 欄位時不處理）。
+- 不再需要 `Ecode` mapping；`--sub-source` 僅用於提供 EMS 的 `Sub_*` 子料幣別/價格。
 
 ### 5.6 `Sub_*` 展開子料列規則
 
@@ -106,7 +104,17 @@
   - `Last BPA Currency = Sub_n_Currency`
   - `Last BPA Price = Sub_n_Price`
   - 沿用主料欄位：`Ecode`、`Model`、`Assembly`、`Board`、`Quantity`、`Main Source`、`Time`
-- 其餘欄位預設為空值，避免誤帶主料專屬資訊（如 `MFG`、`MPN`、`Lead Time`）
+- 其他欄位在子料列維持空值（留白）
+- 為避免混淆，子料列的 `Sub_*` 相關欄位不會帶入（保持空值）
+
+### 5.7 BOM+EMS 展開子料列（目前預設）
+
+- 主料列（`M/S = M`）：直接使用 `BOM COST` 主料列內容
+- 子料列（`M/S = S`）：依 EMS 的 `Sub_n` 展開
+  - `Item = Sub_n`
+  - `Last BPA Currency/Last BPA Price` 取自 `Sub_n_Currency/Sub_n_Price`
+  - 其餘欄位維持空值，只填入主料欄位：`Ecode/Model/Assembly/Board/Quantity/Main Source/Time`（以及 `主料`）
+- 匹配/去重鍵：`Board + Model + Item`
 
 ## 6. 擴充建議
 
@@ -153,8 +161,8 @@
 範例（手動 smoke test）：
 
 ```bash
-python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" --preview
-python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" --ecode-source "data/BOM COST.xlsx" -o "output/result.csv"
+python bom_excel_tool.py "data/BOM COST.xlsx" --preview
+python bom_excel_tool.py "data/BOM COST.xlsx" -o "output/result.csv"
 ```
 
 ## 8. 維護注意事項

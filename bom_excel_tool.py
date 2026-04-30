@@ -537,14 +537,15 @@ def _expand_sub_rows(df: pd.DataFrame) -> pd.DataFrame:
     last_bpa_currency_col = _resolve_column_name(df.columns.tolist(), "Last BPA Currency")
     last_bpa_price_col = _resolve_column_name(df.columns.tolist(), "Last BPA Price")
 
-    carry_cols = [
-        c
-        for c in ("Ecode", "Model", "Assembly", "Board", "Quantity", "Main Source", "Time")
-        if c in df.columns
-    ]
-
     expanded_rows: list[dict[str, Any]] = []
     all_cols = df.columns.tolist()
+    assembly_col = _resolve_column_name(df.columns.tolist(), "Assembly")
+    board_col = _resolve_column_name(df.columns.tolist(), "Board")
+    model_col = _resolve_column_name(df.columns.tolist(), "Model")
+    ecode_col = _resolve_column_name(df.columns.tolist(), "Ecode")
+    quantity_col = _resolve_column_name(df.columns.tolist(), "Quantity")
+    main_source_col = _resolve_column_name(df.columns.tolist(), "Main Source")
+    time_col = _resolve_column_name(df.columns.tolist(), "Time")
     for _, row in df.iterrows():
         main_row = row.to_dict()
         main_item = _cell_str(main_row.get(item_col))
@@ -557,14 +558,29 @@ def _expand_sub_rows(df: pd.DataFrame) -> pd.DataFrame:
             if not sub_item:
                 continue
 
-            sub_row = {col: "" for col in all_cols}
+            # S 列只保留指定主料欄位 + 子料自身需要的欄位，其他一律清空。
+            sub_row = {c: "" for c in all_cols}
             sub_row[item_col] = sub_item
             sub_row[ms_col] = "S"
-            for c in carry_cols:
-                sub_row[c] = main_row.get(c, "")
-            if not _cell_str(sub_row.get("主料")):
-                sub_row["主料"] = main_item
+            sub_row["主料"] = main_item
+            if main_source_col:
+                # Main Source = 主料 Item（也就是你要求的主料）
+                sub_row[main_source_col] = main_item
 
+            if ecode_col:
+                sub_row[ecode_col] = main_row.get(ecode_col, "")
+            if model_col:
+                sub_row[model_col] = main_row.get(model_col, "")
+            if assembly_col:
+                sub_row[assembly_col] = main_row.get(assembly_col, "")
+            if board_col:
+                sub_row[board_col] = main_row.get(board_col, "")
+            if quantity_col:
+                sub_row[quantity_col] = main_row.get(quantity_col, "")
+            if time_col:
+                sub_row[time_col] = main_row.get(time_col, "")
+
+            # 把 Last BPA Currency/Price 指到目前 Sub_n 的幣別/價格
             sub_currency_col = f"{sub_col}_Currency"
             sub_price_col = f"{sub_col}_Price"
             if last_bpa_currency_col and sub_currency_col in df.columns:
@@ -726,13 +742,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-o", "--output", type=Path, help="輸出 .csv 或 .xlsx（依副檔名）")
     parser.add_argument("--sheet", help="工作表名稱（未指定時掃描並合併所有可用工作表）")
     parser.add_argument(
+        "--sub-source",
         "--ecode-source",
+        dest="sub_source",
         type=Path,
-        help="Ecode 對照來源檔（以 Item 對應 Customer PN）",
+        required=False,
+        help="子料來源檔（預設解讀為 EMS BOM COST；提供 Sub_* 的幣別/價格；未提供則使用 BOM COST 內建 Sub_*）",
     )
     parser.add_argument(
+        "--sub-sheet",
         "--ecode-sheet",
-        help="Ecode 對照來源檔工作表（預設作用中工作表）",
+        dest="sub_sheet",
+        help="子料來源檔工作表（預設作用中工作表；未指定時掃描所有工作表）",
     )
     parser.add_argument(
         "--marker",
@@ -841,6 +862,10 @@ def _apply_ecode_if_needed(
 
 def _apply_final_transforms(df: pd.DataFrame, info: BomReadInfo) -> tuple[pd.DataFrame, BomReadInfo]:
     """集中最終資料整理：展開 Sub，並移除 Item 空白列。"""
+    # BOM COST 模式下必須存在 Sub_*，否則無法產生 S 子料列。
+    sub_item_cols = [c for c in df.columns if re.fullmatch(r"Sub_\d+", str(c or ""))]
+    if not sub_item_cols:
+        raise ValueError("BOM COST 找不到 Sub_* 欄位（確認 2ND_SOURCE_TOTAL 起的分組欄位已被正確 rename）。")
     df = _expand_sub_rows(df)
     df = _drop_empty_item_rows(df)
     return df, _update_info_column_count(info, len(df.columns))
@@ -853,6 +878,171 @@ def _drop_empty_item_rows(df: pd.DataFrame) -> pd.DataFrame:
         return df
     mask = df[item_col].fillna("").astype(str).str.strip() != ""
     return df.loc[mask].reset_index(drop=True)
+
+
+def _ensure_ecode_column_from_bom(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    BOM COST 本身含 Ecode（通常是 Customer PN 欄）。
+    - 若已存在 Ecode：不處理
+    - 否則嘗試把 Customer PN 欄改名為 Ecode
+    """
+    if "Ecode" in df.columns:
+        return df
+    customer_pn_col = _resolve_column_name(df.columns.tolist(), "Customer PN")
+    if customer_pn_col:
+        return df.rename(columns={customer_pn_col: "Ecode"})
+    return df
+
+
+def _ensure_unique_bom_ems_key(
+    df: pd.DataFrame,
+    df_name: str,
+    key_cols: tuple[str, str, str],
+) -> None:
+    """
+    確保 (Assembly, Model, Item) 對應唯一，若重複就報錯（依需求：警告並要求唯一）。
+    """
+    a_col, m_col, i_col = key_cols
+    if not all(c in df.columns for c in key_cols):
+        raise ValueError(f"{df_name} 找不到必要 key 欄位: {key_cols}")
+
+    key_df = df[list(key_cols)].fillna("").astype(str)
+    key_series = (
+        key_df[a_col].str.strip()
+        + "||"
+        + key_df[m_col].str.strip()
+        + "||"
+        + key_df[i_col].str.strip()
+    )
+    dup_mask = key_series.duplicated(keep=False)
+    if dup_mask.any():
+        # 顯示前幾個重複 key，便於使用者追查
+        dup_keys = key_series[dup_mask].unique().tolist()[:5]
+        raise ValueError(f"{df_name} 在 (Assembly, Model, Item) 出現重複 key，例子: {dup_keys}")
+
+
+def _expand_sub_rows_from_ems_using_bom_template(
+    df_bom: pd.DataFrame,
+    df_ems: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    產生最終扁平化資料：
+    - 主料列 (M)：直接使用 BOM COST 主料（M/S 已為 M）
+    - 子料列 (S)：依 EMS BOM COST 的 Sub_n 展開；幣別/價格取 Sub_n_Currency/Sub_n_Price
+    - 其他欄位沿用 BOM COST 主料列（以 Assembly+Model+Item 對應）
+    - 同一 key 重複會直接報錯（依需求）
+    """
+    item_col = _resolve_column_name(df_bom.columns.tolist(), "Item")
+    ms_col = _resolve_column_name(df_bom.columns.tolist(), "M/S")
+    model_col = _resolve_column_name(df_bom.columns.tolist(), "Model")
+    board_col = _resolve_column_name(df_bom.columns.tolist(), "Board")
+    time_col = _resolve_column_name(df_bom.columns.tolist(), "Time")
+    assembly_col = _resolve_column_name(df_bom.columns.tolist(), "Assembly")
+    quantity_col = _resolve_column_name(df_bom.columns.tolist(), "Quantity")
+    main_source_col = _resolve_column_name(df_bom.columns.tolist(), "Main Source")
+    ecode_col = _resolve_column_name(df_bom.columns.tolist(), "Ecode")
+
+    if not all([item_col, ms_col, model_col, board_col]):
+        raise ValueError(
+            f"BOM COST 缺少必要欄位（Item/M/S/Board/Model），目前: Item={item_col}, M/S={ms_col}, Board={board_col}, Model={model_col}"
+        )
+
+    last_cur_col = _resolve_column_name(df_bom.columns.tolist(), "Last BPA Currency")
+    last_price_col = _resolve_column_name(df_bom.columns.tolist(), "Last BPA Price")
+    if not last_cur_col or not last_price_col:
+        raise ValueError(
+            f"BOM COST 缺少 Last BPA Currency/Price 欄位，Last BPA Currency={last_cur_col}, Last BPA Price={last_price_col}"
+        )
+
+    # 基於相同規則也要求 EMS 具備必要 key 與 Sub_n 欄位
+    sub_item_cols = [c for c in df_ems.columns if re.fullmatch(r"Sub_\d+", str(c or ""))]
+    sub_item_cols.sort(key=lambda c: int(str(c).split("_")[1]))
+    if not sub_item_cols:
+        raise ValueError("EMS BOM COST 找不到 Sub_* 欄位（已確認 2ND_SOURCE_TOTAL 起的分組應已被 rename）")
+
+    m2_col = _resolve_column_name(df_ems.columns.tolist(), "Model") or model_col
+    i2_col = _resolve_column_name(df_ems.columns.tolist(), "Item") or item_col
+    board2_col = _resolve_column_name(df_ems.columns.tolist(), "Board") or board_col
+
+    _ensure_unique_bom_ems_key(df_bom, "BOM COST", (board_col, model_col, item_col))
+    _ensure_unique_bom_ems_key(df_ems, "EMS BOM COST", (board2_col, m2_col, i2_col))
+
+    # 準備 key -> row lookup（EMS 用）
+    ems_key_to_row: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for _, r in df_ems.iterrows():
+        key = (
+            _cell_str(
+                r.get(board_col) if board_col in df_ems.columns else r.get(board2_col)
+            ),
+            _cell_str(r.get(model_col) if model_col in df_ems.columns else r.get(m2_col)),
+            _cell_str(r.get(item_col) if item_col in df_ems.columns else r.get(i2_col)),
+        )
+        ems_key_to_row[key] = r.to_dict()
+
+    # 主料列 + 子料列
+    all_cols = df_bom.columns.tolist()
+    # 保持與原本 expand_sub_rows 一致：新增 主料 欄
+    if "主料" not in df_bom.columns:
+        insert_at = df_bom.columns.get_loc(item_col) + 1
+        df_bom = df_bom.copy()
+        df_bom.insert(insert_at, "主料", df_bom[item_col])
+        all_cols = df_bom.columns.tolist()
+
+    rows_out: list[dict[str, Any]] = []
+
+    for _, bom_row in df_bom.iterrows():
+        bom_item = _cell_str(bom_row.get(item_col))
+        key = (_cell_str(bom_row.get(board_col)), _cell_str(bom_row.get(model_col)), bom_item)
+
+        # M row：保留 BOM 主料原始內容
+        main_dict = bom_row.to_dict()
+        main_dict["主料"] = bom_item
+        rows_out.append(main_dict)
+
+        # S rows：從 EMS 的同 key 展開
+        ems_row = ems_key_to_row.get(key)
+        if ems_row is None:
+            continue
+
+        for sub_item_col in sub_item_cols:
+            sub_item = _cell_str(ems_row.get(sub_item_col))
+            if not sub_item:
+                continue
+
+            sub_currency_col = f"{sub_item_col}_Currency"
+            sub_price_col = f"{sub_item_col}_Price"
+            sub_currency = ems_row.get(sub_currency_col, "")
+            sub_price = ems_row.get(sub_price_col, "")
+
+            # S row：只保留你指定的主料欄位；其餘全部留空。
+            child_dict = {c: "" for c in all_cols}
+            child_dict[item_col] = sub_item
+            child_dict[ms_col] = "S"
+            child_dict[last_cur_col] = sub_currency if sub_currency is not None else ""
+            child_dict[last_price_col] = sub_price if sub_price is not None else ""
+            child_dict["主料"] = bom_item
+
+            # Main Source = 主料 Item
+            if main_source_col:
+                child_dict[main_source_col] = bom_item
+
+            if ecode_col:
+                child_dict[ecode_col] = bom_row.get(ecode_col, "")
+            if model_col:
+                child_dict[model_col] = bom_row.get(model_col, "")
+            if assembly_col:
+                child_dict[assembly_col] = bom_row.get(assembly_col, "")
+            if board_col:
+                child_dict[board_col] = bom_row.get(board_col, "")
+            if quantity_col:
+                child_dict[quantity_col] = bom_row.get(quantity_col, "")
+            if time_col:
+                child_dict[time_col] = bom_row.get(time_col, "")
+
+            rows_out.append(child_dict)
+
+    out_df = pd.DataFrame(rows_out, columns=all_cols)
+    return out_df
 
 
 def _write_outputs(df: pd.DataFrame, args: argparse.Namespace) -> None:
@@ -894,8 +1084,31 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        df, info = _apply_ecode_if_needed(df, info, args)
-        df, info = _apply_final_transforms(df, info)
+        # BOM COST 當作主料來源：Ecode 直接取自 BOM COST（不做 mapping）
+        df = _ensure_ecode_column_from_bom(df)
+        if "Ecode" not in df.columns:
+            raise ValueError("BOM COST 缺少 Ecode 欄位，請確認是否有 Ecode 或 Customer PN 欄可供轉成 Ecode")
+
+        # 先刪除 Item 空白列，避免後續 key 對應爆掉
+        df = _drop_empty_item_rows(df)
+
+        if args.sub_source:
+            # （進階）若提供 EMS 子料來源，則用 EMS 的 Sub_* 生成 S 子料列
+            sub_sheet_arg: str | int | None = args.sub_sheet if args.sub_sheet else None
+            df_ems, _, processed_sub_sheets = read_bom_multi_sheet(
+                args.sub_source,
+                sheet=sub_sheet_arg,
+                level_marker=args.marker,
+                header_sep=args.sep,
+            )
+            print(f"子料來源工作表數: {len(processed_sub_sheets)}")
+            df_ems = _drop_empty_item_rows(df_ems)
+
+            df = _expand_sub_rows_from_ems_using_bom_template(df, df_ems)
+            info = _update_info_column_count(info, len(df.columns))
+        else:
+            # 預設：只使用 BOM COST 內建 Sub_* 展開
+            df, info = _apply_final_transforms(df, info)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1

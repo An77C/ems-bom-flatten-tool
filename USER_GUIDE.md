@@ -1,8 +1,8 @@
-# BOM Excel Tool 使用者文件
+ # BOM Excel Tool 使用者文件
 
 ## 1. 工具用途
 
-`bom_excel_tool.py` 用來整理 EMS BOM 類型 Excel：
+`bom_excel_tool.py` 用來整理 BOM 類 Excel（主料來源 `BOM COST`、子料來源 `EMS BOM COST`）：
 
 - 自動找到第一欄為 `Level` 的標題中心列
 - 將「上一列 + 中心列 + 下一列」合併成欄位名稱
@@ -10,7 +10,7 @@
 - 新增 `Board` 欄位：當 `Level = 1` 時，取該列 `Description`，並向下填入直到下一個 `Level = 1` 覆蓋
 - 新增 `M/S` 欄位（固定填 `M`）與 `Main Source` 欄位（填入 `Item`）
 - 將 `2ND_SOURCE_TOTAL` 起的尾端欄位依規則重命名為 `Sub_*`
-- 將每列 `Sub_*` 展開為子料列（`M/S = S`），插入在主料列後方
+- 依子料來源的 `Sub_*` 展開產生子料列（`M/S = S`），插入在主料列後方
 
 ## 2. 環境需求
 
@@ -52,7 +52,7 @@ python bom_excel_tool.py "你的Excel檔案.xlsx"
 ## 4. 命令列參數
 
 ```bash
-python bom_excel_tool.py INPUT [-o OUTPUT] [--sheet SHEET] [--marker MARKER] [--sep SEP] [--preview] [--ecode-source ECODE_SOURCE] [--ecode-sheet ECODE_SHEET] [--selected-only | --no-selected]
+python bom_excel_tool.py INPUT [-o OUTPUT] [--sheet SHEET] [--marker MARKER] [--sep SEP] [--preview] [--sub-source SUB_SOURCE] [--sub-sheet SUB_SHEET] [--selected-only | --no-selected]
 ```
 
 - `INPUT`：輸入 `.xlsx` 路徑（必要）
@@ -61,8 +61,10 @@ python bom_excel_tool.py INPUT [-o OUTPUT] [--sheet SHEET] [--marker MARKER] [--
 - `--marker`：標題中心列第一欄文字（預設 `Level`）
 - `--sep`：三列表頭合併分隔字元（預設空白字元 ` `）
 - `--preview`：僅預覽，不寫檔
-- `--ecode-source`：Ecode 對照來源檔（優先以 `Model + Item`，其次 `Assembly(表名) + Item` 對應 `Customer PN`）
-- `--ecode-sheet`：Ecode 對照來源檔工作表（指定單一工作表；未指定時會掃描所有工作表）
+- `--sub-source`：子料來源檔（選填；預設解讀為 `EMS BOM COST`；提供 `Sub_*` 的幣別/價格）
+  - 未提供時會使用 `BOM COST` 內建的 `Sub_*` 展開
+  - 相容舊參數：`--ecode-source` 仍可用，但等同 `--sub-source`
+- `--sub-sheet`：子料來源檔工作表（指定單一工作表；未指定時會掃描所有工作表）
 - `--selected-only`：只輸出指定欄位檔（`*_selected`）
 - `--no-selected`：只輸出完整欄位檔
 
@@ -71,19 +73,19 @@ python bom_excel_tool.py INPUT [-o OUTPUT] [--sheet SHEET] [--marker MARKER] [--
 ### 5.1 只做預覽（不輸出）
 
 ```bash
-python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" --preview
+python bom_excel_tool.py "data/BOM COST.xlsx" --preview
 ```
 
 ### 5.2 輸出 CSV
 
 ```bash
-python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" -o "output/result.csv"
+python bom_excel_tool.py "data/BOM COST.xlsx" -o "output/result.csv"
 ```
 
 ### 5.3 輸出 Excel
 
 ```bash
-python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" -o "output/result.xlsx"
+python bom_excel_tool.py "data/BOM COST.xlsx" -o "output/result.xlsx"
 ```
 
 ### 5.4 指定工作表與分隔符號
@@ -98,20 +100,17 @@ python bom_excel_tool.py "data/sample.xlsx" --sheet "91-017-507025B.401" --sep "
 python bom_excel_tool.py "data/sample.xlsx" -o "output/result.csv"
 ```
 
-未指定 `--sheet` 時，主檔會自動掃描並合併所有含 `Level` 標題的工作表。
+未指定 `--sheet` 時，主檔（`INPUT`）會自動掃描並合併所有含 `Level` 標題的工作表。
 
-### 5.5 直接指定兩個檔案回填 Ecode
+### 5.5 （選填）指定子料來源（BOM COST + EMS BOM COST）
 
 ```bash
-python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" --ecode-source "data/BOM COST.xlsx" -o "output/result_with_ecode.csv"
+python bom_excel_tool.py "data/BOM COST.xlsx" --sub-source "data/EMS BOM COST.xlsx" -o "output/result.csv"
 ```
 
-Ecode 對照規則：
-
-- 可一次掃描對照檔多個工作表（未指定 `--ecode-sheet` 時）
-- 對照鍵值優先為：`Model(主檔欄位)` + `Item`
-- 若 `Model + Item` 未命中，回退使用：`Assembly(主檔欄位)` + `Item`
-- Assembly 維度預設取對照檔「工作表名稱」（若對照表中有 Assembly 欄位則優先使用）
+說明：
+- `INPUT(BOM COST)` 會直接產生主料列（`M/S = M`），並從 `BOM COST` 取得 `Ecode`。
+- `--sub-source(EMS BOM COST)` 提供 `Sub_n` 的子料列（`M/S = S`），其 `Last BPA Currency/Last BPA Price` 來自 `Sub_n_Currency/Sub_n_Price`。
 
 ### 5.6 展開 Sub 為子料列
 
@@ -121,13 +120,13 @@ Ecode 對照規則：
 - 子料 `M/S` = `S`
 - 子料 `Last BPA Currency` = `Sub_n_Currency`
 - 子料 `Last BPA Price` = `Sub_n_Price`
-- 子料沿用主料欄位：`Ecode`、`Model`、`Assembly`、`Board`、`Quantity`、`Main Source`、`Time`
+- 子料只填入主料對應欄位：`Ecode`、`Model`、`Assembly`、`Board`、`Quantity`、`Main Source`（=主料）、`Time`；其他欄位保留空值
 - 會新增 `主料` 欄位：主料列為自身 `Item`，子料列為對應主料 `Item`
 
 ### 5.7 只輸出指定欄位檔
 
 ```bash
-python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" --selected-only -o "output/result.csv"
+python bom_excel_tool.py "data/BOM COST.xlsx" --selected-only -o "output/result.csv"
 ```
 
 只會輸出：`output/result_selected.csv`
@@ -135,7 +134,7 @@ python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" --selected-only
 ### 5.8 只輸出完整欄位檔
 
 ```bash
-python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" --no-selected -o "output/result.csv"
+python bom_excel_tool.py "data/BOM COST.xlsx" --no-selected -o "output/result.csv"
 ```
 
 只會輸出：`output/result.csv`
@@ -203,15 +202,14 @@ python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" --no-selected -
 3. 子料列 `Item` 取 `Sub_n`
 4. 子料列 `M/S` 固定為 `S`
 5. 子料列 `Last BPA Currency` / `Last BPA Price` 分別取 `Sub_n_Currency` / `Sub_n_Price`
-6. 子料列帶入主料欄位：`Ecode`、`Model`、`Assembly`、`Board`、`Quantity`、`Main Source`、`Time`、`主料`
+6. 子料列只帶入主料欄位：`Ecode`、`Model`、`Assembly`、`Board`、`Quantity`、`Main Source`（=主料）、`Time`；其他欄位在子料列維持空值（留白），僅 `Last BPA Currency/Last BPA Price` 會帶入 `Sub_n_Currency/Sub_n_Price`
 
 執行順序重點：
 
-1. 先套用 `Sub_*` 規則
-2. 再新增 `M/S` 與 `Main Source`
-3. 若有 `--ecode-source`，先回填 `Ecode`
-4. 最後展開 `Sub_*` 為子料列
-5. 可避免 `M/S`、`Main Source` 被誤納入 `Sub_*` 分組，且子料列可沿用主料 `Ecode`
+1. 讀取 `INPUT(BOM COST)`：產生主料列、並填入 `Board/Model/Time`
+2. 從 `BOM COST` 取得 `Ecode`
+3. 若提供 `--sub-source(EMS BOM COST)`：用 EMS 的 `Sub_*` 展開產生子料列
+4. 子料列的 `Last BPA Currency/Last BPA Price` 取自 EMS 的 `Sub_n_Currency/Sub_n_Price`
 
 ## 7. 錯誤排除
 
@@ -226,3 +224,4 @@ python bom_excel_tool.py "data/91-017-507025B EMS BOM COST.xlsx" --no-selected -
 - 目前讀取模式為 `read_only=True`，適合大檔案
 - 空白資料列會自動略過
 - 欄位範圍會同時參考「表頭」與「資料列」；即使尾端沒有欄名，只要資料有值仍會保留
+- 去重/唯一鍵：工具會以 `(Board + Model + Item)` 做主料與子料匹配，並嚴格檢查 `BOM COST` / `EMS BOM COST` 任一端若出現重複 key 會直接拋出 `ValueError`
